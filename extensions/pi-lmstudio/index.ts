@@ -126,17 +126,21 @@ interface LMStudioResponse {
 /**
  * Helper to map LMStudioModel to Pi's model format
  */
-function mapModels(models: LMStudioModel[], providerName: string): ProviderModelConfig[] {
-  return models.map(m => ({
-    id: m.key,
-    name: m.display_name,
-    reasoning: m.capabilities?.reasoning !== undefined,
-    provider: providerName,
-    input: m.capabilities?.vision ? ["text", "image"] : ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: m.loaded_instances[0]?.config.context_length ?? m.max_context_length,
-    maxTokens: m.max_context_length,
-  }));
+export function mapModels(models: LMStudioModel[], providerName: string): ProviderModelConfig[] {
+  return models.map(m => {
+    const contextWindow = m.loaded_instances[0]?.config.context_length ?? m.max_context_length;
+
+    return {
+      id: m.key,
+      name: m.display_name,
+      reasoning: m.capabilities?.reasoning !== undefined,
+      provider: providerName,
+      input: m.capabilities?.vision ? ["text", "image"] : ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow,
+      maxTokens: contextWindow,
+    };
+  });
 }
 
 /**
@@ -186,18 +190,7 @@ export default async function (pi: ExtensionAPI) {
     for (const result of results) {
       if (result.status !== "fulfilled") continue;
       const { server, models } = result.value;
-      const providerConfig: any = {
-        baseUrl: `${server.url}/v1/`,
-        api: "openai-completions",
-        models,
-      };
-      if (server.token) {
-        providerConfig.apiKey = server.token;
-        providerConfig.authHeader = true;
-      } else {
-        providerConfig.apiKey = "lmstudio";
-      }
-      pi.registerProvider(server.providerName, providerConfig);
+      registerServerProvider(server, models);
       nowRegistered.add(server.providerName);
     }
 
@@ -210,9 +203,38 @@ export default async function (pi: ExtensionAPI) {
     registered = nowRegistered;
   }
 
+  function registerServerProvider(server: Server, models: ProviderModelConfig[]) {
+    const providerConfig: any = {
+      baseUrl: `${server.url}/v1/`,
+      api: "openai-completions",
+      models,
+    };
+    if (server.token) {
+      providerConfig.apiKey = server.token;
+      providerConfig.authHeader = true;
+    } else {
+      providerConfig.apiKey = "lmstudio";
+    }
+    pi.registerProvider(server.providerName, providerConfig);
+  }
+
   await syncProviders();
 
   let fetchedThisCycle = false;
+
+  pi.on("input", async (_event, ctx) => {
+    if (!ctx.isIdle()) return;
+    const server = resolveServers().find(s => s.providerName === ctx.model?.provider);
+    if (!server) return;
+
+    try {
+      const models = await fetchModels(server.url, server.providerName, server.token);
+      registerServerProvider(server, models);
+      registered.add(server.providerName);
+    } catch {
+      // Keep the last registered provider configuration when refresh fails.
+    }
+  });
 
   pi.on("agent_start", async () => {
     fetchedThisCycle = false;
