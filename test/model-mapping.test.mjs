@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import extension, { mapModels } from "../extensions/pi-lmstudio/index.ts";
 
@@ -84,13 +87,68 @@ test("refreshes model limits for idle input before preflight", async () => {
 
   try {
     await extension(pi);
-    await handlers.get("input")({ streamingBehavior: undefined });
-    await handlers.get("input")({ streamingBehavior: "steer" });
-    await handlers.get("input")({ streamingBehavior: "followUp" });
+    const inputHandler = handlers.get("input");
+    const input = { type: "input", text: "prompt", source: "interactive" };
+    await inputHandler(input, { model: { provider: "lmstudio" }, isIdle: () => true });
+    await inputHandler(input, { model: { provider: "lmstudio" }, isIdle: () => false });
 
     assert.deepEqual(registeredContextWindows, [262144, 40192]);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("refreshes only the selected LM Studio server before an idle prompt", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalHome = process.env.HOME;
+  const home = mkdtempSync(path.join(os.tmpdir(), "pi-lmstudio-"));
+  const configDirectory = path.join(home, ".pi", "agent");
+  mkdirSync(configDirectory, { recursive: true });
+  writeFileSync(
+    path.join(configDirectory, "lmstudio.json"),
+    JSON.stringify({
+      urls: [
+        { name: "selected", url: "http://selected.test" },
+        { name: "other", url: "http://other.test" },
+      ],
+    }),
+  );
+  process.env.HOME = home;
+
+  const requestedUrls = [];
+  const handlers = new Map();
+  const configuredExtension = (await import("../extensions/pi-lmstudio/index.ts?selected-server-test")).default;
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(url);
+    return {
+      ok: true,
+      json: async () => ({ models: [model()] }),
+    };
+  };
+
+  const pi = {
+    on: (event, handler) => handlers.set(event, handler),
+    registerProvider: () => {},
+    unregisterProvider: () => {},
+  };
+
+  try {
+    await configuredExtension(pi);
+    await handlers.get("input")(
+      { type: "input", text: "prompt", source: "interactive" },
+      { model: { provider: "lmstudio/selected" }, isIdle: () => true },
+    );
+
+    assert.deepEqual(requestedUrls.sort(), [
+      "http://other.test/api/v1/models",
+      "http://selected.test/api/v1/models",
+      "http://selected.test/api/v1/models",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

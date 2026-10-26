@@ -190,18 +190,7 @@ export default async function (pi: ExtensionAPI) {
     for (const result of results) {
       if (result.status !== "fulfilled") continue;
       const { server, models } = result.value;
-      const providerConfig: any = {
-        baseUrl: `${server.url}/v1/`,
-        api: "openai-completions",
-        models,
-      };
-      if (server.token) {
-        providerConfig.apiKey = server.token;
-        providerConfig.authHeader = true;
-      } else {
-        providerConfig.apiKey = "lmstudio";
-      }
-      pi.registerProvider(server.providerName, providerConfig);
+      registerServerProvider(server, models);
       nowRegistered.add(server.providerName);
     }
 
@@ -214,13 +203,36 @@ export default async function (pi: ExtensionAPI) {
     registered = nowRegistered;
   }
 
+  function registerServerProvider(server: Server, models: ProviderModelConfig[]) {
+    const providerConfig: any = {
+      baseUrl: `${server.url}/v1/`,
+      api: "openai-completions",
+      models,
+    };
+    if (server.token) {
+      providerConfig.apiKey = server.token;
+      providerConfig.authHeader = true;
+    } else {
+      providerConfig.apiKey = "lmstudio";
+    }
+    pi.registerProvider(server.providerName, providerConfig);
+  }
+
   await syncProviders();
 
   let fetchedThisCycle = false;
 
-  pi.on("input", async (event) => {
-    if (!("streamingBehavior" in event) || event.streamingBehavior === undefined) {
-      await syncProviders();
+  pi.on("input", async (_event, ctx) => {
+    if (!ctx.isIdle()) return;
+    const server = resolveServers().find(s => s.providerName === ctx.model?.provider);
+    if (!server) return;
+
+    try {
+      const models = await fetchModels(server.url, server.providerName, server.token);
+      registerServerProvider(server, models);
+      registered.add(server.providerName);
+    } catch {
+      // Keep the last registered provider configuration when refresh fails.
     }
   });
 
